@@ -23,7 +23,6 @@ import tokenize
 
 import six
 
-from .types import NoneType
 
 if (3, 5) <= sys.version_info < (3, 5, 3):
     # Load the typing backport instead of the built-in typing library.
@@ -82,7 +81,7 @@ def get_type_hints(obj,  # type: Any
         defaults = _get_func_defaults(obj)
         for name, value in six.iteritems(hints):
             if value is None:
-                value = NoneType
+                value = type(None)
             if isinstance(value, six.string_types):
                 value = _ForwardRef(value)
             value = _eval_type(

@@ -11,6 +11,15 @@ Classes:
     Singleton: A metaclass to force a class to only ever be instantiated once.
     DefType: A union of function and method types.
     NoneType: An alias for type(None)
+    Valid: A sliceable type that validates any assigned value against a
+        validation function.
+    File: A type instance of Valid that validates that the value is a file.
+    Dir: A type instance of Valid that validates that the value is a directory.
+    Path: A type instance of Valid that expands a value to a path.
+    TypedObject: An object that asserts all annotated attributes are of the
+        correct type.
+    CastObject: An object that coerces all annotated attributes to the correct
+        type.
 """
 
 from __future__ import absolute_import
@@ -31,6 +40,13 @@ import types
 
 import six
 
+from . import (
+    _is_instance,
+    cast,
+    get_type_hints,
+    Optional
+)
+
 __all__ = (
     'Bounded',
     'Length',
@@ -40,7 +56,9 @@ __all__ = (
     'Valid',
     'File',
     'Dir',
-    'Path'
+    'Path',
+    'TypedObject',
+    'CastObject'
 )
 
 
@@ -455,3 +473,163 @@ Path.__class_repr__ = '{}.{}'.format(Path.__module__, 'Path')
 ExistingPath = Valid[_expand_path, os.path.exists]
 ExistingPath.__class_repr__ = '{}.{}'.format(
     ExistingPath.__module__, 'ExistingPath')
+
+
+def _create_typed_object_meta(_get_property):
+    """Create a metaclass for typed objects.
+
+    Args:
+        _get_property: A function that takes three parameters: the name of the
+            property attribute, the name of the private attribute that holds
+            property data, and a type. This function must return a property
+            object for the requested values.
+
+    Returns:
+        A metaclass that reads annotations from a class definition and creates
+        properties for annotated, public, non-constant, non-method attributes
+        that will guarantee the type of the stored value matches the
+        annotation.
+    """
+    class _TypedObjectMeta(type):
+        """A metaclass that reads annotations from a class definition."""
+
+        def __new__(cls, name, bases, attrs):
+            """Create class objs that replaces annotated attrs with properties.
+
+            Args:
+                cls: The class object being created.
+                name: The name of the class to create.
+                bases: The list of all base classes for the new class.
+                attrs: The list of all attributes for the new class from the
+                    definition.
+
+            Returns:
+                A new class instance with the expected base classes and
+                attributes, but with annotated, public, non-constant,
+                non-method attributes replaced by property objects that
+                validate against the annotated type.
+            """
+            annotations = attrs.get('__annotations__', {})
+            names = list(attrs) + list(annotations)
+            typed_attrs = {}
+            for attr in names:
+                type_ = None
+                if attr in annotations:
+                    if attr in attrs and attrs[attr] is None:
+                        type_ = Optional[annotations[attr]]
+                    else:
+                        type_ = annotations[attr]
+                private_attr = '__{}'.format(attr)
+                if (type_ and not attr.startswith('_') and
+                        not attr.isupper() and
+                        private_attr not in names and
+                        not isinstance(getattr(attrs, attr, None),
+                                       types.MethodType)):
+                    if attr in attrs:
+                        typed_attrs[private_attr] = attrs[attr]
+                    typed_attrs[attr] = _get_property(
+                        attr, private_attr, type_)
+                else:
+                    typed_attrs[attr] = attrs.get(attr)
+            return super(_TypedObjectMeta, cls).__new__(
+                cls, name, bases, typed_attrs)
+
+    return _TypedObjectMeta
+
+
+def _get_type_name(type_):
+    """Return a displayable name for the type.
+
+    Args:
+        type_: A class object.
+
+    Returns:
+        A string value describing the class name that can be used in a natural
+        language sentence.
+    """
+    return getattr(type_, '__name__', str(type_))
+
+
+def _get_strong_property(attr, private_attr, type_):
+    """Get a property object that does not allow values of incompatible types.
+
+    Args:
+        attr: The name of the attribute for which to create the property.
+        private_attr: The attribute that will store the actual data for the
+            attribute.
+        type_: The type to validate set values against.
+
+    Returns:
+        A property object that will reject values of incompatible types.
+    """
+    def _fget(self):
+        """Get the attribute from self without revealing the private name."""
+        try:
+            return getattr(self, private_attr)
+        except AttributeError:
+            raise AttributeError(
+                "'{}' object has no attribute '{}'".format(
+                    _get_type_name(type_), attr))
+
+    def _fset(self, value):
+        """Set the value on self iff the value is an instance of type_.
+
+        Args:
+            value: The value to set.
+
+        Raises:
+            TypeError: Raised when the value is not an instance of type_.
+        """
+        if not _is_instance(value, type_):
+            raise TypeError(
+                'Cannot assign value of type {} to attribute of type {}.'
+                .format(_get_type_name(type(value)), _get_type_name(type_)))
+        return setattr(self, private_attr, value)
+
+    return property(_fget, _fset)
+
+
+def _get_cast_property(attr, private_attr, type_):
+    """Get a property object that handles casting the correct type.
+
+    Args:
+        attr: The name of the attribute for which to create the property.
+        private_attr: The attribute that will store the actual data for the
+            attribute.
+        type_: The type to use while casting incompatible values to be stored.
+
+    Returns:
+        A property object that will cast values to the expected type.
+    """
+    def _fget(self):
+        """Get the attribute from self without revealing the private name."""
+        try:
+            return getattr(self, private_attr)
+        except AttributeError:
+            raise AttributeError(
+                "'{}' object has no attribute '{}'".format(
+                    _get_type_name(type_), attr))
+
+    def _fset(self, value):
+        """Set the value on self and coerce it to type_ if necessary.
+
+        Args:
+            value: The value to set.
+
+        Raises:
+            TypeError: Raised when the value is not an instance of type_ and
+                cannot be cast into a compatible object of type_.
+        """
+        return setattr(self, private_attr, cast(type_, value))
+
+    return property(_fget, _fset)
+
+
+@six.add_metaclass(_create_typed_object_meta(_get_strong_property))
+class TypedObject(object):
+    """TODO"""
+
+
+@six.add_metaclass(_create_typed_object_meta(_get_cast_property))
+class CastObject(object):
+    """TODO"""
