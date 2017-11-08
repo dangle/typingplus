@@ -32,6 +32,7 @@ import six
 
 from . import (  # noqa: F401 pylint: disable=unused-import,no-name-in-module
     _is_instance,
+    _qualname,
     cast,
     _ForwardRef,
     Any,
@@ -481,11 +482,30 @@ def _get_type_name(type_):
         A string value describing the class name that can be used in a natural
         language sentence.
     """
-    return getattr(type_, '__name__', str(type_))
+    return _qualname(type_).rsplit('.', 1)[-1] or str(type_)
 
 
 class _AnnotatedObjectMeta(type):
     """A metaclass that reads annotations from a class definition."""
+
+    @staticmethod
+    def __is_propertyable(names, attrs, annotations, attr):
+        """Determine if an attribute can be replaced with a property.
+
+        Args:
+            names: The complete list of all attribute names for the class.
+            attrs: The attribute dict returned by __prepare__.
+            annotations: A mapping of all defined annotations for the class.
+            attr: The attribute to test.
+
+        Returns:
+            True if the attribute can be replaced with a property; else False.
+        """
+        return (attr in annotations and
+                not attr.startswith('_') and
+                not attr.isupper() and
+                '__{}'.format(attr) not in names and
+                not isinstance(getattr(attrs, attr, None), types.MethodType))
 
     @staticmethod
     def _get_fget(attr, private_attr, type_):
@@ -513,41 +533,40 @@ class _AnnotatedObjectMeta(type):
 
         return _fget
 
-    @staticmethod
-    def __is_propertyable(names, attrs, annotations, attr):
-        """Determine if an attribute can be replaced with a property.
+    @classmethod
+    def _get___repr__(cls, name, properties):
+        """Create a default __repr__ method for the class.
 
         Args:
-            names: The complete list of all attribute names for the class.
-            attrs: The attribute dict returned by __prepare__.
-            annotations: A mapping of all defined annotations for the class.
-            attr: The attribute to test.
+            name: The name of the class.
+            properties: A list of all values replaced by properties.
 
         Returns:
-            True if the attribute can be replaced with a property; else False.
+            A generated __repr__ method that will print a human-readable string
+            that can be interpreted by Python to recreate the instance.
         """
-        return (attr in annotations and
-                not attr.startswith('_') and
-                not attr.isupper() and
-                '__{}'.format(attr) not in names and
-                not isinstance(getattr(attrs, attr, None), types.MethodType))
+        def _repr(self):
+            """Return a Python readable representation of the class."""
+            return '{}({})'.format(
+                name,
+                ', '.join(
+                    '{}={}'.format(attr_name, repr(getattr(self, attr_name)))
+                    for attr_name in properties))
+        return _repr
 
     @classmethod
-    def _get___init__(cls, names, attrs, annotations):
+    def _get___init__(cls, attrs, properties):
         """Create a default __init__ method for the class.
 
         Args:
-            names: The complete list of all attribute names for the class.
             attrs: The attribute dict returned by __prepare__.
-            annotations: A mapping of all defined annotations for the class.
+            properties: A list of all values replaced by properties.
 
         Returns:
             A generated __init__ method will accept all annotated class
             attributes that have been turned into properties as parameters and
             set them as instance attributes on the newly created instance.
         """
-        properties = [attr for attr in annotations if cls.__is_propertyable(
-                      names, attrs, annotations, attr)]
         required = [attr for attr in properties if attr not in attrs]
 
         def __init__(self, *args, **kwargs):
@@ -610,9 +629,12 @@ class _AnnotatedObjectMeta(type):
                     cls._get_fget(attr, private_attr, type_),
                     cls._get_fset(attr, private_attr, type_)
                 )
+        properties = [attr for attr in annotations if cls.__is_propertyable(
+                      names, attrs, annotations, attr)]
         if '__init__' not in attrs:
-            typed_attrs['__init__'] = cls._get___init__(
-                names, attrs, annotations)
+            typed_attrs['__init__'] = cls._get___init__(attrs, properties)
+        if '__repr__' not in attrs:
+            typed_attrs['__repr__'] = cls._get___repr__(name, properties)
         return super(_AnnotatedObjectMeta, cls).__new__(
             cls, name, bases, typed_attrs)
 
