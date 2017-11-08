@@ -724,7 +724,7 @@ class TypedObject(object):
     as parameters. If an annotated attribute is not defined, it will be
     required in __init__.
 
-    >>> from typingplus.types import *
+    >>> from typingplus.types import CastObject
     >>> class Point(TypedObject):
     ...     x: int
     ...     y: int
@@ -754,7 +754,7 @@ class CastObject(object):
     as parameters. If an annotated attribute is not defined, it will be
     required in __init__.
 
-    >>> from typingplus.types import *
+    >>> from typingplus.types import CastObject
     >>> class Point(CastObject):
     ...     x: int
     ...     y: int
