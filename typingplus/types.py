@@ -32,7 +32,6 @@ import six
 
 from . import (  # noqa: F401 pylint: disable=unused-import,no-name-in-module
     _is_instance,
-    _qualname,
     cast,
     _ForwardRef,
     Any,
@@ -482,7 +481,8 @@ def _get_type_name(type_):
         A string value describing the class name that can be used in a natural
         language sentence.
     """
-    return _qualname(type_).rsplit('.', 1)[-1] or str(type_)
+    name = getattr(type_, '__qualname__', getattr(type_, '__name__', ''))
+    return name.rsplit('.', 1)[-1] or str(type_)
 
 
 class _AnnotatedObjectMeta(type):
