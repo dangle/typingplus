@@ -16,10 +16,14 @@ Classes:
     File: A type instance of Valid that validates that the value is a file.
     Dir: A type instance of Valid that validates that the value is a directory.
     Path: A type instance of Valid that expands a value to a path.
-    TypedObject: An object that asserts all annotated attributes are of the
+    BaseTypedObject: An object that asserts all annotated attributes are of the
         correct type.
-    CastObject: An object that coerces all annotated attributes to the correct
-        type.
+    TypedObject: A derivative of BaseTypedObject that implements the default
+        comparison operators and hash.
+    BaseCastObject: An object that coerces all annotated attributes to the
+        correct type.
+    CastObject: A derivative of BaseCastObject that implements the default
+        comparison operators and hash.
 """
 
 from __future__ import absolute_import
@@ -53,7 +57,9 @@ __all__ = (
     'File',
     'Dir',
     'Path',
+    'BaseTypedObject',
     'TypedObject',
+    'BaseCastObject',
     'CastObject'
 )
 
@@ -485,11 +491,22 @@ def _get_type_name(type_):
     return name.rsplit('.', 1)[-1] or str(type_)
 
 
-class _AnnotatedObjectMeta(type):
-    """A metaclass that reads annotations from a class definition."""
+def _create_typed_object_meta(get_fset):
+    """Create a metaclass for typed objects.
 
-    @staticmethod
-    def __is_propertyable(names, attrs, annotations, attr):
+    Args:
+        get_fset: A function that takes three parameters: the name of an
+            attribute, the name of the private attribute that holds the
+            property data, and a type. This function must an object method that
+            accepts a value.
+
+    Returns:
+        A metaclass that reads annotations from a class definition and creates
+        properties for annotated, public, non-constant, non-method attributes
+        that will guarantee the type of the stored value matches the
+        annotation.
+    """
+    def _is_propertyable(names, attrs, annotations, attr):
         """Determine if an attribute can be replaced with a property.
 
         Args:
@@ -507,7 +524,6 @@ class _AnnotatedObjectMeta(type):
                 '__{}'.format(attr) not in names and
                 not isinstance(getattr(attrs, attr, None), types.MethodType))
 
-    @staticmethod
     def _get_fget(attr, private_attr, type_):
         """Create a property getter method for an attribute.
 
@@ -533,186 +549,280 @@ class _AnnotatedObjectMeta(type):
 
         return _fget
 
-    @classmethod
-    def _get___repr__(cls, name, properties):
-        """Create a default __repr__ method for the class.
+    class _AnnotatedObjectMeta(type):
+        """A metaclass that reads annotations from a class definition."""
 
-        Args:
-            name: The name of the class.
-            properties: A list of all values replaced by properties.
-
-        Returns:
-            A generated __repr__ method that will print a human-readable string
-            that can be interpreted by Python to recreate the instance.
-        """
-        def _repr(self):
-            """Return a Python readable representation of the class."""
-            return '{}({})'.format(
-                name,
-                ', '.join(
-                    '{}={}'.format(attr_name, repr(getattr(self, attr_name)))
-                    for attr_name in properties))
-        return _repr
-
-    @classmethod
-    def _get___init__(cls, attrs, properties):
-        """Create a default __init__ method for the class.
-
-        Args:
-            attrs: The attribute dict returned by __prepare__.
-            properties: A list of all values replaced by properties.
-
-        Returns:
-            A generated __init__ method will accept all annotated class
-            attributes that have been turned into properties as parameters and
-            set them as instance attributes on the newly created instance.
-        """
-        required = [attr for attr in properties if attr not in attrs]
-
-        def __init__(self, *args, **kwargs):
-            """Set all attributes according to their annotation status."""
-            positionals = zip(properties, args)
-            for attr, value in positionals:
-                if attr in kwargs:
-                    raise TypeError(
-                        "__init__() got multiple values for argument '{}'"
-                        .format(attr))
-                kwargs[attr] = value
-            missing = [attr for attr in required if attr not in kwargs]
-            if missing:
-                num_missing = len(missing)
-                if num_missing > 1:
-                    args = ', '.join("'{}'".format(m) for m in missing[:-1])
-                    if num_missing > 2:
-                        args += ','
-                    args += " and '{}'".format(missing[-1])
-                else:
-                    args = "'{}'".format(missing[0])
-                raise TypeError(
-                    '__init__() missing {} required argument{}: {}'.format(
-                        num_missing, 's' if num_missing > 1 else '', args))
-            for attr, value in six.iteritems(kwargs):
-                if attr in properties:
-                    setattr(self, attr, value)
-
-        return __init__
-
-    def __new__(cls, name, bases, attrs):
-        """Create class objs that replaces annotated attrs with properties.
-
-        Args:
-            cls: The class object being created.
-            name: The name of the class to create.
-            bases: The list of all base classes for the new class.
-            attrs: The list of all attributes for the new class from the
-                definition.
-
-        Returns:
-            A new class instance with the expected base classes and
-            attributes, but with annotated, public, non-constant,
-            non-method attributes replaced by property objects that
-            validate against the annotated type.
-        """
-        annotations = attrs.get('__annotations__', {})
-        names = list(attrs) + list(annotations)
-        typed_attrs = {}
-        for attr in names:
-            typed_attrs[attr] = attrs.get(attr)
-            if cls.__is_propertyable(names, attrs, annotations, attr):
-                private_attr = '__{}'.format(attr)
-                if attr in attrs:
-                    typed_attrs[private_attr] = attrs[attr]
-                type_ = (
-                    Optional[annotations[attr]] if attr in attrs and
-                    attrs[attr] is None else annotations[attr])
-                typed_attrs[attr] = property(
-                    cls._get_fget(attr, private_attr, type_),
-                    cls._get_fset(attr, private_attr, type_)
-                )
-        properties = [attr for attr in annotations if cls.__is_propertyable(
-                      names, attrs, annotations, attr)]
-        if '__init__' not in attrs:
-            typed_attrs['__init__'] = cls._get___init__(attrs, properties)
-        if '__repr__' not in attrs:
-            typed_attrs['__repr__'] = cls._get___repr__(name, properties)
-        return super(_AnnotatedObjectMeta, cls).__new__(
-            cls, name, bases, typed_attrs)
-
-
-class _TypedObjectMeta(_AnnotatedObjectMeta):
-    """A metaclass that enforces types through attribute properties."""
-
-    @staticmethod
-    def _get_fset(_, private_attr, type_):
-        """Create a property setter method for the attribute.
-
-        Args:
-            _: The name of the attribute to set. Unused.
-            private_attr: The name of the attribute that will store any data
-                related to the attribute.
-            type_: The annotated type defining what values can be stored in the
-                attribute.
-
-        Returns:
-            A method that takes self and a value and stores that value on self
-            in the private attribute iff the value is an instance of type_.
-        """
-        def _fset(self, value):
-            """Set the value on self iff the value is an instance of type_.
+        def __new__(cls, name, bases, attrs):
+            """Create class objs that replaces annotated attrs with properties.
 
             Args:
-                value: The value to set.
+                cls: The class object being created.
+                name: The name of the class to create.
+                bases: The list of all base classes for the new class.
+                attrs: The list of all attributes for the new class from the
+                    definition.
 
-            Raises:
-                TypeError: Raised when the value is not an instance of type_.
+            Returns:
+                A new class instance with the expected base classes and
+                attributes, but with annotated, public, non-constant,
+                non-method attributes replaced by property objects that
+                validate against the annotated type.
             """
-            if not _is_instance(value, type_):
-                raise TypeError(
-                    'Cannot assign value of type {} to attribute of type {}.'
-                    .format(
-                        _get_type_name(type(value)),
-                        _get_type_name(type_)))
-            return setattr(self, private_attr, value)
+            annotations = attrs.get('__annotations__', {})
+            names = list(attrs) + list(annotations)
+            typed_attrs = {}
+            for attr in names:
+                typed_attrs[attr] = attrs.get(attr)
+                if _is_propertyable(names, attrs, annotations, attr):
+                    private_attr = '__{}'.format(attr)
+                    if attr in attrs:
+                        typed_attrs[private_attr] = attrs[attr]
+                    type_ = (
+                        Optional[annotations[attr]] if attr in attrs and
+                        attrs[attr] is None else annotations[attr])
+                    typed_attrs[attr] = property(
+                        _get_fget(attr, private_attr, type_),
+                        get_fset(attr, private_attr, type_)
+                    )
+            properties = [attr for attr in annotations if _is_propertyable(
+                          names, attrs, annotations, attr)]
+            typed_attrs['_tp__typed_properties'] = properties
+            typed_attrs['_tp__undefined_typed_properties'] = [
+                attr for attr in properties if attr not in attrs]
+            return super(_AnnotatedObjectMeta, cls).__new__(
+                cls, name, bases, typed_attrs)
 
-        return _fset
+    return _AnnotatedObjectMeta
 
 
-class _CastObjectMeta(_AnnotatedObjectMeta):
-    """A metaclass that enforces types through casting attribute properties."""
+@_create_typed_object_meta
+def _TypedObjectMeta(_, private_attr, type_):
+    """Create a property setter method for the attribute.
 
-    @staticmethod
-    def _get_fset(_, private_attr, type_):
-        """Create a property setter method for the attribute.
+    Args:
+        _: The name of the attribute to set. Unused.
+        private_attr: The name of the attribute that will store any data
+            related to the attribute.
+        type_: The annotated type defining what values can be stored in the
+            attribute.
+
+    Returns:
+        A method that takes self and a value and stores that value on self
+        in the private attribute iff the value is an instance of type_.
+    """
+    def _fset(self, value):
+        """Set the value on self iff the value is an instance of type_.
 
         Args:
-            _: The name of the attribute to set. Unused.
-            private_attr: The name of the attribute that will store any data
-                related to the attribute.
-            type_: The annotated type defining what values can be stored in the
-                attribute.
+            value: The value to set.
+
+        Raises:
+            TypeError: Raised when the value is not an instance of type_.
+        """
+        if not _is_instance(value, type_):
+            raise TypeError(
+                'Cannot assign value of type {} to attribute of type {}.'
+                .format(
+                    _get_type_name(type(value)),
+                    _get_type_name(type_)))
+        return setattr(self, private_attr, value)
+
+    return _fset
+
+
+@_create_typed_object_meta
+def _CastObjectMeta(_, private_attr, type_):
+    """Create a property setter method for the attribute.
+
+    Args:
+        _: The name of the attribute to set. Unused.
+        private_attr: The name of the attribute that will store any data
+            related to the attribute.
+        type_: The annotated type defining what values can be stored in the
+            attribute.
+
+    Returns:
+        A method that takes self and a value and stores that value on self
+        in the private attribute if the value is not an instance of type_
+        and cannot be cast into type_.
+    """
+    def _fset(self, value):
+        """Set the value on self and coerce it to type_ if necessary.
+
+        Args:
+            value: The value to set.
+
+        Raises:
+            TypeError: Raised when the value is not an instance of type_
+                and cannot be cast into a compatible object of type_.
+        """
+        return setattr(self, private_attr, cast(type_, value))
+
+    return _fset
+
+
+class _BaseAnnotatedObject(object):
+    """A base class that looks for class attributes to create __init__."""
+
+    def __init__(self, *args, **kwargs):
+        """Set all attributes according to their annotation status."""
+        super(_BaseAnnotatedObject, self).__init__()
+        properties = self.__class__._tp__typed_properties
+        required = self.__class__._tp__undefined_typed_properties
+        positionals = zip(properties, args)
+        for attr, value in positionals:
+            if attr in kwargs:
+                raise TypeError(
+                    "__init__() got multiple values for argument '{}'"
+                    .format(attr))
+            kwargs[attr] = value
+        missing = [attr for attr in required if attr not in kwargs]
+        if missing:
+            num_missing = len(missing)
+            if num_missing > 1:
+                args = ', '.join("'{}'".format(m) for m in missing[:-1])
+                if num_missing > 2:
+                    args += ','
+                args += " and '{}'".format(missing[-1])
+            else:
+                args = "'{}'".format(missing[0])
+            raise TypeError(
+                '__init__() missing {} required argument{}: {}'.format(
+                    num_missing, 's' if num_missing > 1 else '', args))
+        for attr, value in six.iteritems(kwargs):
+            if attr in properties:
+                setattr(self, attr, value)
+
+    def __repr__(self):
+        """Return a Python readable representation of the class."""
+        return '{}({})'.format(
+            self.__class__.__name__,
+            ', '.join(
+                '{}={}'.format(attr_name, repr(getattr(self, attr_name)))
+                for attr_name in self.__class__._tp__typed_properties))
+
+
+class _AnnotatedObjectComparisonMixin(object):
+    """A mixin to add comparisons to classes made by _AnnotatedObjectMeta."""
+
+    def _tp__get_typed_properties(self):
+        """Return a tuple of typed attrs that can be used for comparisons.
+
+        Raises:
+            NotImplementedError: Raised if this class was mixed into a class
+                that was not created by _AnnotatedObjectMeta.
+        """
+        try:
+            return tuple(getattr(self, p) for p in
+                         self.__class__._tp__typed_properties)
+        except AttributeError:
+            raise NotImplementedError
+
+    def __eq__(self, other):
+        """Test if two objects of the same base class are equal.
+
+        If the objects are not of the same class, Python will default to
+        comparison-by-ID.
+
+        Args:
+            other: The object to compare for equality.
 
         Returns:
-            A method that takes self and a value and stores that value on self
-            in the private attribute if the value is not an instance of type_
-            and cannot be cast into type_.
+            True if the objects are equal; else False.
         """
-        def _fset(self, value):
-            """Set the value on self and coerce it to type_ if necessary.
+        if other.__class__ is not self.__class__:
+            return NotImplemented
+        return (self._tp__get_typed_properties() ==
+                other._tp__get_typed_properties())
 
-            Args:
-                value: The value to set.
+    def __ne__(self, other):
+        """Test if two objects of the same class are not equal.
 
-            Raises:
-                TypeError: Raised when the value is not an instance of type_
-                    and cannot be cast into a compatible object of type_.
-            """
-            return setattr(self, private_attr, cast(type_, value))
+        If the objects are not of the same class, Python will default to
+        comparison-by-ID.
 
-        return _fset
+        Args:
+            other: The object to compare for non-equality.
+
+        Returns:
+            True if the objects are not equal; else False.
+        """
+        if other.__class__ is not self.__class__:
+            return NotImplemented
+        return not self == other
+
+    def __lt__(self, other):
+        """Test if self is less than an object of the same class.
+
+        Args:
+            other: The object to compare against.
+
+        Returns:
+            True if self is less than other; else False.
+
+        Raises:
+            TypeError: Raised if the objects are not of the same class.
+        """
+        if other.__class__ is not self.__class__:
+            return NotImplemented
+        return (self._tp__get_typed_properties() <
+                other._tp__get_typed_properties())
+
+    def __le__(self, other):
+        """Test if self is less than or equal an object of the same class.
+
+        Args:
+            other: The object to compare against.
+
+        Returns:
+            True if self is less than or equal other; else False.
+
+        Raises:
+            TypeError: Raised if the objects are not of the same class.
+        """
+        if other.__class__ is not self.__class__:
+            return NotImplemented
+        return self == other or self < other
+
+    def __gt__(self, other):
+        """Test if self is greater than an object of the same class.
+
+        Args:
+            other: The object to compare against.
+
+        Returns:
+            True if self is greater than other; else False.
+
+        Raises:
+            TypeError: Raised if the objects are not of the same class.
+        """
+        if other.__class__ is not self.__class__:
+            return NotImplemented
+        return not self <= other
+
+    def __ge__(self, other):
+        """Test if self is greater than or equal an object of the same class.
+
+        Args:
+            other: The object to compare against.
+
+        Returns:
+            True if self is greater than or equal to other; else False.
+
+        Raises:
+            TypeError: Raised if the objects are not of the same class.
+        """
+        if other.__class__ is not self.__class__:
+            return NotImplemented
+        return not self < other
+
+    def __hash__(self):
+        """Generate a hash for the object based on the annotated attrs."""
+        return hash(self._tp__get_typed_properties())
 
 
 @six.add_metaclass(_TypedObjectMeta)
-class TypedObject(object):
+class BaseTypedObject(_BaseAnnotatedObject):
     """A base class to create instance attrs for annotated class attrs.
 
     For every class attribute that is annotated, public, and not constant in
@@ -740,8 +850,41 @@ class TypedObject(object):
     """
 
 
+class TypedObject(BaseTypedObject, _AnnotatedObjectComparisonMixin):
+    """A base class to create instance attrs for annotated class attrs.
+
+    For every class attribute that is annotated, public, and not constant in
+    the subclasses, this base class will generate property objects for the
+    the instances that will enforce the type of the value set.
+
+    If the subclass does not define __init__, a default implementation will be
+    generated that takes all of the annotated, public, non-constant attributes
+    as parameters. If an annotated attribute is not defined, it will be
+    required in __init__.
+
+    >>> from typingplus.types import CastObject
+    >>> class Point(TypedObject):
+    ...     x: int
+    ...     y: int
+    ...
+    ...
+    >>> p = Point(0, 0)
+    >>> p.x
+    0
+    >>> p.x = '0'
+    Traceback (most recent call last):
+        ...
+    TypeError: Cannot assign value of type str to attribute of type int.
+    >>> p2 = Point(2, 2)
+    >>> p < p2
+    True
+    >>> p > p2
+    False
+    """
+
+
 @six.add_metaclass(_CastObjectMeta)
-class CastObject(object):
+class BaseCastObject(_BaseAnnotatedObject):
     """A base class to create instance attrs for annotated class attrs.
 
     For every class attribute that is annotated, public, and not constant in
@@ -753,6 +896,9 @@ class CastObject(object):
     generated that takes all of the annotated, public, non-constant attributes
     as parameters. If an annotated attribute is not defined, it will be
     required in __init__.
+
+    Additionally, this class implements basic comparison operators and the hash
+    function.
 
     >>> from typingplus.types import CastObject
     >>> class Point(CastObject):
@@ -770,4 +916,44 @@ class CastObject(object):
     Traceback (most recent call last):
         ...
     TypeError: Cannot convert 'five' to int.
+    """
+
+
+class CastObject(BaseCastObject, _AnnotatedObjectComparisonMixin):
+    """A base class to create instance attrs for annotated class attrs.
+
+    For every class attribute that is annotated, public, and not constant in
+    the subclasses, this base class will generate property objects for the
+    the instances that will enforce the type of the value set by attempting to
+    cast the given value to the set type.
+
+    If the subclass does not define __init__, a default implementation will be
+    generated that takes all of the annotated, public, non-constant attributes
+    as parameters. If an annotated attribute is not defined, it will be
+    required in __init__.
+
+    Additionally, this class implements basic comparison operators and the hash
+    function.
+
+    >>> from typingplus.types import CastObject
+    >>> class Point(CastObject):
+    ...     x: int
+    ...     y: int
+    ...
+    ...
+    >>> p = Point(0, 0)
+    >>> p.x
+    0
+    >>> p.x = '5'
+    >>> p.x
+    5
+    >>> p.x = 'five'
+    Traceback (most recent call last):
+        ...
+    TypeError: Cannot convert 'five' to int.
+    >>> p2 = Point(2, 2)
+    >>> p < p2
+    True
+    >>> p > p2
+    False
     """
