@@ -20,8 +20,8 @@ setup(
     license='MIT',
     py_modules=['typingplus'],
     install_requires=[
-        'typing >= 3.5.3',
-        'typing_extensions >= 3.6.2',
+        'typing >= 3.5.3 ; python_version < "3.7.0"',
+        'typing_extensions >= 3.6.2 ; python_version < "3.7.0"',
         'six >= 1.10.0'
     ],
     setup_requires=[
